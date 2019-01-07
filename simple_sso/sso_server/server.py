@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
-import urlparse
-from django.conf.urls import patterns, url
+from __future__ import unicode_literals
+
+from django.conf.urls import url
 from django.contrib import admin
 from django.contrib.admin.options import ModelAdmin
-from django.core.urlresolvers import reverse
 from django.http import (HttpResponseForbidden, HttpResponseBadRequest, HttpResponseRedirect, QueryDict)
+from django.utils import timezone
 from django.views.generic.base import View
 from itsdangerous import URLSafeTimedSerializer
 from simple_sso.sso_server.models import Token, Consumer
 import datetime
-import urllib
 from webservices.models import Provider
 from webservices.sync import provider_for_django
+
+from ..compat import reverse, urlparse, urlencode, urlunparse, user_is_authenticated
 
 
 class BaseProvider(Provider):
@@ -39,10 +41,10 @@ class AuthorizeView(View):
     """
     The client get's redirected to this view with the `request_token` obtained
     by the Request Token Request by the client application beforehand.
-    
+
     This view checks if the user is logged in on the server application and if
     that user has the necessary rights.
-    
+
     If the user is not logged in, the user is prompted to log in.
     """
     server = None
@@ -58,7 +60,7 @@ class AuthorizeView(View):
         if not self.check_token_timeout():
             return self.token_timeout()
         self.token.refresh()
-        if request.user.is_authenticated():
+        if user_is_authenticated(request.user):
             return self.handle_authenticated_user()
         else:
             return self.handle_unauthenticated_user()
@@ -73,7 +75,7 @@ class AuthorizeView(View):
         return HttpResponseForbidden('Token timed out')
 
     def check_token_timeout(self):
-        delta = datetime.datetime.now() - self.token.timestamp
+        delta = timezone.now() - self.token.timestamp
         if delta > self.server.token_timeout:
             self.token.delete()
             return False
@@ -87,8 +89,8 @@ class AuthorizeView(View):
             return self.access_denied()
 
     def handle_unauthenticated_user(self):
-        next = '%s?%s' % (self.request.path, urllib.urlencode([('token', self.token.request_token)]))
-        url = '%s?%s' % (reverse(self.server.auth_view_name), urllib.urlencode([('next', next)]))
+        next = '%s?%s' % (self.request.path, urlencode([('token', self.token.request_token)]))
+        url = '%s?%s' % (reverse(self.server.auth_view_name), urlencode([('next', next)]))
         return HttpResponseRedirect(url)
 
     def access_denied(self):
@@ -98,10 +100,10 @@ class AuthorizeView(View):
         self.token.user = self.request.user
         self.token.save()
         serializer = URLSafeTimedSerializer(self.token.consumer.private_key)
-        parse_result = urlparse.urlparse(self.token.redirect_to)
+        parse_result = urlparse(self.token.redirect_to)
         query_dict = QueryDict(parse_result.query, mutable=True)
         query_dict['access_token'] = serializer.dumps(self.token.access_token)
-        url = urlparse.urlunparse((parse_result.scheme, parse_result.netloc, parse_result.path, '', query_dict.urlencode(), ''))
+        url = urlunparse((parse_result.scheme, parse_result.netloc, parse_result.path, '', query_dict.urlencode(), ''))
         return HttpResponseRedirect(url)
 
 
@@ -134,7 +136,7 @@ class Server(object):
     verification_provider = VerificationProvider
     token_timeout = datetime.timedelta(minutes=5)
     client_admin = ConsumerAdmin
-    auth_view_name = 'django.contrib.auth.views.login'
+    auth_view_name = 'login'
 
     def __init__(self, **kwargs):
         for key, value in kwargs.items():
@@ -166,8 +168,8 @@ class Server(object):
         return user_data
 
     def get_urls(self):
-        return patterns('',
+        return [
             url(r'^request-token/$', provider_for_django(self.request_token_provider(server=self)), name='simple-sso-request-token'),
             url(r'^authorize/$', self.authorize_view.as_view(server=self), name='simple-sso-authorize'),
             url(r'^verify/$', provider_for_django(self.verification_provider(server=self)), name='simple-sso-verify'),
-        )
+        ]

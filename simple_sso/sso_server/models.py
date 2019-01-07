@@ -1,55 +1,80 @@
 # -*- coding: utf-8 -*-
 from django.conf import settings
 from django.db import models
-from simple_sso.utils import gen_secret_key
-import datetime
+from django.utils import timezone
+from django.utils.deconstruct import deconstructible
+
+from ..utils import gen_secret_key
 
 
-def gen_client_key(field):
+@deconstructible
+class SecretKeyGenerator(object):
     """
-    Helper function to give default values to Client.secret and Client.key
+    Helper to give default values to Client.secret and Client.key
     """
-    def _genkey():
+
+    def __init__(self, field):
+        self.field = field
+
+    def __call__(self):
         key = gen_secret_key(64)
-        while Consumer.objects.filter(**{field: key}).exists():
+        while self.get_model().objects.filter(**{self.field: key}).exists():
             key = gen_secret_key(64)
         return key
-    return _genkey
 
-def gen_token_field(field):
-    """
-    Helper function to give default values to Client.secret and Client.key
-    """
-    def _genkey():
-        key = gen_secret_key(64)
-        while Token.objects.filter(**{field: key}).exists():
-            key = gen_secret_key(64)
-        return key
-    return _genkey
+
+class ConsumerSecretKeyGenerator(SecretKeyGenerator):
+    def get_model(self):
+        return Consumer
+
+
+class TokenSecretKeyGenerator(SecretKeyGenerator):
+    def get_model(self):
+        return Token
 
 
 class Consumer(models.Model):
-    name = models.CharField(max_length=100, unique=True)
-    private_key = models.CharField(max_length=64, unique=True, default=gen_client_key('private_key'))
-    public_key = models.CharField(max_length=64, unique=True, default=gen_client_key('public_key'))
-    
+    name = models.CharField(max_length=255, unique=True)
+    private_key = models.CharField(
+        max_length=64, unique=True,
+        default=ConsumerSecretKeyGenerator('private_key')
+    )
+    public_key = models.CharField(
+        max_length=64, unique=True,
+        default=ConsumerSecretKeyGenerator('public_key')
+    )
+
     def __unicode__(self):
         return self.name
-    
+
     def rotate_keys(self):
-        self.secret = gen_client_key('private_key')()
-        self.key = gen_client_key('public_key')()
+        self.secret = ConsumerSecretKeyGenerator('private_key')()
+        self.key = ConsumerSecretKeyGenerator('public_key')()
         self.save()
 
 
 class Token(models.Model):
-    consumer = models.ForeignKey(Consumer, related_name='tokens')
-    request_token = models.CharField(unique=True, max_length=64, default=gen_token_field('request_token'))
-    access_token = models.CharField(unique=True, max_length=64, default=gen_token_field('access_token'))
-    timestamp = models.DateTimeField(default=datetime.datetime.now)
+    consumer = models.ForeignKey(
+        Consumer,
+        related_name='tokens',
+        on_delete=models.CASCADE,
+    )
+    request_token = models.CharField(
+        unique=True, max_length=64,
+        default=TokenSecretKeyGenerator('request_token')
+    )
+    access_token = models.CharField(
+        unique=True, max_length=64,
+        default=TokenSecretKeyGenerator('access_token')
+    )
+    timestamp = models.DateTimeField(default=timezone.now)
     redirect_to = models.CharField(max_length=255)
-    user = models.ForeignKey(getattr(settings, 'AUTH_USER_MODEL', 'auth.User'), null=True)
+    user = models.ForeignKey(
+        getattr(settings, 'AUTH_USER_MODEL', 'auth.User'),
+        null=True,
+        on_delete=models.CASCADE,
+    )
 
     def refresh(self):
-        self.timestamp = datetime.datetime.now()
+        self.timestamp = timezone.now()
         self.save()

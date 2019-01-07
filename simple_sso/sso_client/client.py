@@ -1,15 +1,21 @@
 # -*- coding: utf-8 -*-
-import urllib
-import urlparse
-from django.conf.urls import patterns, url
+from django.conf.urls import url
 from django.contrib.auth import login
 from django.contrib.auth.backends import ModelBackend
 from django.contrib.auth.models import User
-from django.core.urlresolvers import reverse
 from django.http import HttpResponseRedirect
 from django.views.generic import View
 from itsdangerous import URLSafeTimedSerializer
 from webservices.sync import SyncConsumer
+
+from ..compat import (
+    NoReverseMatch,
+    reverse,
+    urlparse,
+    urlunparse,
+    urljoin,
+    urlencode,
+)
 
 
 class LoginView(View):
@@ -18,13 +24,13 @@ class LoginView(View):
     def get(self, request):
         next = self.get_next()
         scheme = 'https' if request.is_secure() else 'http'
-        query = urllib.urlencode([('next', next)])
+        query = urlencode([('next', next)])
         netloc = request.get_host()
         path = reverse('simple-sso-authenticate')
-        redirect_to = urlparse.urlunparse((scheme, netloc, path, '', query, ''))
+        redirect_to = urlunparse((scheme, netloc, path, '', query, ''))
         request_token = self.client.get_request_token(redirect_to)
-        host = urlparse.urljoin(self.client.server_url, 'authorize/')
-        url = '%s?%s' % (host, urllib.urlencode([('token', request_token)]))
+        host = urljoin(self.client.server_url, 'authorize/')
+        url = '%s?%s' % (host, urlencode([('token', request_token)]))
         return HttpResponseRedirect(url)
 
     def get_next(self):
@@ -35,7 +41,7 @@ class LoginView(View):
         next = self.request.GET.get('next', None)
         if not next:
             return '/'
-        netloc = urlparse.urlparse(next)[1]
+        netloc = urlparse(next)[1]
         # Heavier security check -- don't allow redirection to a different
         # host.
         # Taken from django.contrib.auth.views.login
@@ -74,23 +80,34 @@ class Client(object):
 
     @classmethod
     def from_dsn(cls, dsn):
-        parse_result = urlparse.urlparse(dsn)
+        parse_result = urlparse(dsn)
         public_key = parse_result.username
         private_key = parse_result.password
         netloc = parse_result.hostname
         if parse_result.port:
             netloc += ':%s' % parse_result.port
-        server_url = urlparse.urlunparse((parse_result.scheme, netloc, parse_result.path, parse_result.params, parse_result.query, parse_result.fragment))
+        server_url = urlunparse((parse_result.scheme, netloc, parse_result.path, parse_result.params, parse_result.query, parse_result.fragment))
         return cls(server_url, public_key, private_key)
 
     def get_request_token(self, redirect_to):
-        return self.consumer.consume('/request-token/', {'redirect_to': redirect_to})['request_token']
+        try:
+            url = reverse('simple-sso-request-token')
+        except NoReverseMatch:
+            # thisisfine
+            url = '/request-token/'
+        return self.consumer.consume(url, {'redirect_to': redirect_to})['request_token']
 
     def get_user(self, access_token):
         data = {'access_token': access_token}
         if self.user_extra_data:
             data['extra_data'] = self.user_extra_data
-        user_data = self.consumer.consume('/verify/', data)
+
+        try:
+            url = reverse('simple-sso-verify')
+        except NoReverseMatch:
+            # thisisfine
+            url = '/verify/'
+        user_data = self.consumer.consume(url, data)
         user = self.build_user(user_data)
         return user
 
@@ -104,7 +121,7 @@ class Client(object):
         return user
 
     def get_urls(self):
-        return patterns('',
+        return [
             url(r'^$', self.login_view.as_view(client=self), name='simple-sso-login'),
             url(r'^authenticate/$', self.authenticate_view.as_view(client=self), name='simple-sso-authenticate'),
-        )
+        ]
